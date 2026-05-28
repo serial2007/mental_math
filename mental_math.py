@@ -12,7 +12,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, localcontext
 from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
@@ -81,12 +81,12 @@ def quantizer(precision: int) -> Decimal:
     return Decimal("1") if precision == 0 else Decimal(f"1e-{precision}")
 
 
-def round_decimal(value: Decimal, precision: int) -> Decimal:
-    return value.quantize(quantizer(precision), rounding=ROUND_HALF_UP)
+def floor_decimal(value: Decimal, precision: int) -> Decimal:
+    return value.quantize(quantizer(precision), rounding=ROUND_FLOOR)
 
 
 def format_decimal(value: Decimal, precision: int) -> str:
-    return f"{round_decimal(value, precision):.{precision}f}"
+    return f"{floor_decimal(value, precision):.{precision}f}"
 
 
 def is_perfect_square(value: int) -> bool:
@@ -154,7 +154,7 @@ def make_division(difficulty: Difficulty, precision: int) -> Problem:
     return Problem(
         f"{numerator} / {divisor} = ",
         rf"\frac{{{numerator}}}{{{divisor}}} =",
-        round_decimal(result, precision),
+        floor_decimal(result, precision),
         format_decimal(result, precision),
         "Division",
         True,
@@ -174,9 +174,9 @@ def make_square(difficulty: Difficulty, precision: int) -> Problem:
 
 def make_square_root(difficulty: Difficulty, precision: int) -> Problem:
     ranges = {
-        "easy": (1000, 99_999),
-        "medium": (100_000, 99_999_999),
-        "hard": (100_000_000, 999_999_999_999),
+        "easy": (20, 400),
+        "medium": (200, 9999),
+        "hard": (1000, 25000),
     }
     while True:
         number = random_int(difficulty, ranges)
@@ -190,7 +190,7 @@ def make_square_root(difficulty: Difficulty, precision: int) -> Problem:
     return Problem(
         f"sqrt({number}) = ",
         rf"\sqrt{{{number}}} =",
-        round_decimal(result, precision),
+        floor_decimal(result, precision),
         format_decimal(result, precision),
         "Square root",
         True,
@@ -212,7 +212,7 @@ def parse_approximate_answer(raw: str, precision: int) -> Decimal | None:
     if not text:
         return None
     try:
-        return round_decimal(Decimal(text), precision)
+        return floor_decimal(Decimal(text), precision)
     except (InvalidOperation, ValueError):
         return None
 
