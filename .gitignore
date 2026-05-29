@@ -1,4 +1,7 @@
 **/__pycache__/
 **/matplotlib_cache/
+.venv-android/
+.buildozer/
+bin/
 *.json
 *.bak

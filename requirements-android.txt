@@ -1,0 +1,3 @@
+kivy>=2.3
+buildozer>=1.6
+cython==0.29.34
