@@ -261,6 +261,131 @@ def determinant_prompt(matrix: list[list[Decimal]]) -> str:
     return f"det({'; '.join(rows)}) = "
 
 
+def configure_latex_fonts() -> None:
+    from matplotlib import rcParams
+
+    rcParams["mathtext.fontset"] = "cm"
+    rcParams["font.family"] = "serif"
+    rcParams["font.serif"] = [
+        "Computer Modern Roman",
+        "CMU Serif",
+        "Latin Modern Roman",
+        "DejaVu Serif",
+    ]
+
+
+def determinant_matrix_to_png(matrix: tuple[tuple[str, ...], ...], font_size: float = 42.0, dpi: int = 220) -> bytes | None:
+    try:
+        cache_dir = APP_DIR / "matplotlib_cache"
+        cache_dir.mkdir(exist_ok=True)
+        os.environ.setdefault("MPLBACKEND", "Agg")
+        os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
+
+        from matplotlib import get_data_path
+        from matplotlib.font_manager import FontProperties, findfont
+        from PIL import Image, ImageDraw, ImageFont
+
+        configure_latex_fonts()
+        font_px = max(42, int(font_size * dpi / 72))
+        try:
+            cmr10 = findfont(FontProperties(family="cmr10"), fallback_to_default=False)
+        except Exception:
+            cmr10 = str(Path(get_data_path()) / "fonts" / "ttf" / "cmr10.ttf")
+        try:
+            font = ImageFont.truetype(cmr10, font_px)
+        except Exception:
+            font = ImageFont.load_default()
+
+        probe = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(probe)
+
+        def text_width(text: str) -> int:
+            if not text:
+                return 0
+            return int(draw.textlength(text, font=font))
+
+        def text_height(text: str = "-1000") -> int:
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            return bottom - top
+
+        def split_number(text: str) -> tuple[str, str, str]:
+            if "." not in text:
+                return text, "", ""
+            left, right = text.split(".", 1)
+            return left, ".", right
+
+        rows = [[split_number(value) for value in row] for row in matrix]
+        column_count = len(rows[0])
+        left_widths = [0] * column_count
+        right_widths = [0] * column_count
+        dot_width = text_width(".")
+        has_decimal = [False] * column_count
+        for row in rows:
+            for column, (left, dot, right) in enumerate(row):
+                left_widths[column] = max(left_widths[column], text_width(left))
+                right_widths[column] = max(right_widths[column], text_width(right))
+                has_decimal[column] = has_decimal[column] or bool(dot)
+
+        cell_heights = [text_height(value) for row in matrix for value in row]
+        cell_height = max(cell_heights) if cell_heights else text_height()
+        row_gap = int(font_px * 0.42)
+        column_gap = int(font_px * 0.82)
+        bar_gap = int(font_px * 0.24)
+        bar_width = max(4, int(font_px * 0.045))
+        padding_x = int(font_px * 0.18)
+        padding_y = int(font_px * 0.20)
+        equals_gap = int(font_px * 0.36)
+        equals_width = text_width("=")
+
+        column_widths = [
+            left_widths[column] + (dot_width if has_decimal[column] else 0) + right_widths[column]
+            for column in range(column_count)
+        ]
+        matrix_width = sum(column_widths) + column_gap * (column_count - 1)
+        matrix_height = len(rows) * cell_height + row_gap * (len(rows) - 1)
+        image_width = (
+            padding_x * 2
+            + bar_width * 2
+            + bar_gap * 2
+            + matrix_width
+            + equals_gap
+            + equals_width
+        )
+        image_height = padding_y * 2 + matrix_height
+
+        image = Image.new("RGBA", (image_width, image_height), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(image)
+        color = (17, 24, 39, 255)
+        matrix_x = padding_x + bar_width + bar_gap
+        matrix_y = padding_y
+        left_bar_x = padding_x
+        right_bar_x = matrix_x + matrix_width + bar_gap
+        draw.rounded_rectangle((left_bar_x, padding_y, left_bar_x + bar_width, padding_y + matrix_height), radius=bar_width // 2, fill=color)
+        draw.rounded_rectangle((right_bar_x, padding_y, right_bar_x + bar_width, padding_y + matrix_height), radius=bar_width // 2, fill=color)
+
+        column_x = matrix_x
+        for column in range(column_count):
+            decimal_x = column_x + left_widths[column]
+            for row_index, row in enumerate(rows):
+                left, dot, right = row[column]
+                y = matrix_y + row_index * (cell_height + row_gap)
+                draw.text((decimal_x - text_width(left), y), left, font=font, fill=color)
+                if dot:
+                    draw.text((decimal_x, y), dot, font=font, fill=color)
+                    draw.text((decimal_x + dot_width, y), right, font=font, fill=color)
+            column_x += column_widths[column] + column_gap
+
+        equals_x = right_bar_x + bar_width + equals_gap
+        equals_y = padding_y + (matrix_height - cell_height) / 2
+        draw.text((equals_x, equals_y), "=", font=font, fill=color)
+
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception:
+        return None
+
+
 def make_determinant_problem(size: int, difficulty: Difficulty, precision: int) -> Problem:
     determinant = determinant_2x2 if size == 2 else determinant_3x3
     while True:
@@ -636,7 +761,7 @@ class TrainerWindowBase:
 def run_gui(args: argparse.Namespace) -> int:
     try:
         from PySide6.QtCore import QRectF, Qt, QTimer
-        from PySide6.QtGui import QPainter
+        from PySide6.QtGui import QPainter, QPixmap
         from PySide6.QtSvg import QSvgRenderer
         from PySide6.QtWidgets import (
             QApplication,
@@ -665,17 +790,9 @@ def run_gui(args: argparse.Namespace) -> int:
             cache_dir = APP_DIR / "matplotlib_cache"
             cache_dir.mkdir(exist_ok=True)
             os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
-            from matplotlib import rcParams
             from matplotlib.mathtext import math_to_image
 
-            rcParams["mathtext.fontset"] = "cm"
-            rcParams["font.family"] = "serif"
-            rcParams["font.serif"] = [
-                "Computer Modern Roman",
-                "CMU Serif",
-                "Latin Modern Roman",
-                "DejaVu Serif",
-            ]
+            configure_latex_fonts()
 
             buffer = BytesIO()
             math_to_image(
@@ -694,31 +811,51 @@ def run_gui(args: argparse.Namespace) -> int:
             super().__init__()
             self.renderer = QSvgRenderer(self)
             self.has_svg = False
+            self.pixmap = QPixmap()
             self.setMinimumHeight(136)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         def load_svg(self, svg: bytes) -> bool:
+            self.pixmap = QPixmap()
             self.has_svg = self.renderer.load(svg)
             self.update()
             return self.has_svg
 
+        def load_png(self, png: bytes) -> bool:
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(png, "PNG"):
+                return False
+            self.has_svg = False
+            self.pixmap = pixmap
+            self.update()
+            return True
+
         def clear_svg(self) -> None:
             self.has_svg = False
+            self.pixmap = QPixmap()
             self.update()
 
         def paintEvent(self, event) -> None:
             super().paintEvent(event)
-            if not self.has_svg:
+            has_pixmap = not self.pixmap.isNull()
+            if not self.has_svg and not has_pixmap:
                 return
 
-            natural = self.renderer.defaultSize()
-            if natural.width() <= 0 or natural.height() <= 0:
+            if self.has_svg:
+                natural = self.renderer.defaultSize()
+                natural_width = natural.width()
+                natural_height = natural.height()
+            else:
+                natural_width = self.pixmap.width()
+                natural_height = self.pixmap.height()
+
+            if natural_width <= 0 or natural_height <= 0:
                 aspect = 4.0
             else:
-                aspect = natural.width() / natural.height()
+                aspect = natural_width / natural_height
 
             max_width = min(self.width() * 0.86, 680)
-            max_height = min(self.height() * 0.58, 112)
+            max_height = min(self.height() * (0.78 if has_pixmap else 0.58), 146 if has_pixmap else 112)
             width = max_width
             height = width / aspect
             if height > max_height:
@@ -736,7 +873,11 @@ def run_gui(args: argparse.Namespace) -> int:
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setRenderHint(QPainter.TextAntialiasing)
             painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            self.renderer.render(painter, rect)
+            if self.has_svg:
+                self.renderer.render(painter, rect)
+            else:
+                self.pixmap.setDevicePixelRatio(1.0)
+                painter.drawPixmap(rect, self.pixmap, QRectF(0, 0, natural_width, natural_height))
 
     class TrainerWindow(QMainWindow, TrainerWindowBase):
         def __init__(self, initial_args: argparse.Namespace) -> None:
@@ -982,6 +1123,15 @@ def run_gui(args: argparse.Namespace) -> int:
             self.problem_label.setText(text)
 
         def set_problem_latex(self, problem: Problem) -> None:
+            if problem.matrix is not None:
+                font_size = 44.0 if len(problem.matrix) <= 2 else 39.0
+                png = determinant_matrix_to_png(problem.matrix, font_size=font_size)
+                if png is not None and self.problem_svg.load_png(png):
+                    self.problem_label.clear()
+                    self.problem_label.hide()
+                    self.problem_svg.show()
+                    return
+
             svg = latex_to_svg(problem.latex)
             if svg is None:
                 self.set_problem_text(problem.prompt)
