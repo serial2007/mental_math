@@ -4,21 +4,24 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
-from kivy.graphics import Color, Line, Rectangle
 from kivy.metrics import dp, sp
 from kivy.properties import BooleanProperty
 from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.gridlayout import GridLayout
+from kivy.uix.image import Image as KivyImage
 from kivy.uix.label import Label
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.spinner import Spinner
@@ -29,7 +32,7 @@ from kivy.utils import escape_markup
 import mental_math as engine
 
 
-OPERATION_ORDER = ["add", "sub", "mul", "div", "square", "sqrt"]
+OPERATION_ORDER = ["add", "sub", "mul", "div", "square", "sqrt", "det2", "det3"]
 DIFFICULTY_ORDER = ["easy", "medium", "hard"]
 DIFFICULTY_FROM_LABEL = {label: key for key, label in engine.DIFFICULTY_LABELS.items()}
 
@@ -107,6 +110,176 @@ def wrong_answer_markup(raw_answer: str, correct_answer: str) -> str:
     return "\n".join(lines)
 
 
+def configure_latex_fonts() -> None:
+    from matplotlib import rcParams
+
+    rcParams["mathtext.fontset"] = "cm"
+    rcParams["font.family"] = "serif"
+    rcParams["font.serif"] = [
+        "Computer Modern Roman",
+        "CMU Serif",
+        "Latin Modern Roman",
+        "DejaVu Serif",
+    ]
+
+
+def latex_to_texture(expression: str, font_size: float, dpi: int):
+    try:
+        app = App.get_running_app()
+        cache_base = Path(app.user_data_dir) if app is not None else Path.cwd()
+        cache_dir = cache_base / "matplotlib_cache"
+        cache_dir.mkdir(exist_ok=True)
+        os.environ.setdefault("MPLBACKEND", "Agg")
+        os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
+
+        from matplotlib import figure
+        from matplotlib.font_manager import FontProperties
+        from matplotlib.mathtext import MathTextParser
+
+        configure_latex_fonts()
+        buffer = BytesIO()
+        math_expression = f"${expression}$"
+        prop = FontProperties(family="serif", size=font_size)
+        parser = MathTextParser("path")
+        width, height, depth, *_ = parser.parse(math_expression, dpi=72, prop=prop)
+        fig = figure.Figure(
+            figsize=(width / 72.0, height / 72.0),
+            facecolor=(1, 1, 1, 0),
+        )
+        fig.patch.set_alpha(0)
+        fig.text(0, depth / height, math_expression, fontproperties=prop, color="#111827")
+        fig.savefig(
+            buffer,
+            dpi=dpi,
+            format="png",
+            transparent=True,
+            facecolor=(1, 1, 1, 0),
+            edgecolor=(1, 1, 1, 0),
+        )
+        buffer.seek(0)
+        texture = CoreImage(buffer, ext="png").texture
+        texture.mag_filter = "linear"
+        texture.min_filter = "linear"
+        return texture
+    except Exception as exc:
+        print(f"Formula bitmap render failed: {exc}")
+        return None
+
+
+def determinant_to_texture(matrix: tuple[tuple[str, ...], ...], font_size: float, dpi: int):
+    try:
+        os.environ.setdefault("MPLBACKEND", "Agg")
+
+        from matplotlib import get_data_path
+        from matplotlib.font_manager import FontProperties, findfont
+        from PIL import Image, ImageDraw, ImageFont
+
+        configure_latex_fonts()
+        font_px = max(42, int(font_size * dpi / 72))
+        try:
+            cmr10 = findfont(FontProperties(family="cmr10"), fallback_to_default=False)
+        except Exception:
+            cmr10 = str(Path(get_data_path()) / "fonts" / "ttf" / "cmr10.ttf")
+        try:
+            font = ImageFont.truetype(cmr10, font_px)
+        except Exception:
+            font = ImageFont.load_default()
+
+        probe = Image.new("RGBA", (1, 1), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(probe)
+
+        def text_width(text: str) -> int:
+            if not text:
+                return 0
+            return int(draw.textlength(text, font=font))
+
+        def text_height(text: str = "-1000") -> int:
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            return bottom - top
+
+        def split_number(text: str) -> tuple[str, str, str]:
+            if "." not in text:
+                return text, "", ""
+            left, right = text.split(".", 1)
+            return left, ".", right
+
+        rows = [[split_number(value) for value in row] for row in matrix]
+        column_count = len(rows[0])
+        left_widths = [0] * column_count
+        right_widths = [0] * column_count
+        dot_width = text_width(".")
+        has_decimal = [False] * column_count
+        for row in rows:
+            for column, (left, dot, right) in enumerate(row):
+                left_widths[column] = max(left_widths[column], text_width(left))
+                right_widths[column] = max(right_widths[column], text_width(right))
+                has_decimal[column] = has_decimal[column] or bool(dot)
+
+        cell_heights = [text_height(value) for row in matrix for value in row]
+        cell_height = max(cell_heights) if cell_heights else text_height()
+        row_gap = int(font_px * 0.42)
+        column_gap = int(font_px * 0.82)
+        bar_gap = int(font_px * 0.24)
+        bar_width = max(4, int(font_px * 0.045))
+        padding_x = int(font_px * 0.18)
+        padding_y = int(font_px * 0.20)
+        equals_gap = int(font_px * 0.36)
+        equals_width = text_width("=")
+
+        column_widths = [
+            left_widths[column] + (dot_width if has_decimal[column] else 0) + right_widths[column]
+            for column in range(column_count)
+        ]
+        matrix_width = sum(column_widths) + column_gap * (column_count - 1)
+        matrix_height = len(rows) * cell_height + row_gap * (len(rows) - 1)
+        image_width = (
+            padding_x * 2
+            + bar_width * 2
+            + bar_gap * 2
+            + matrix_width
+            + equals_gap
+            + equals_width
+        )
+        image_height = padding_y * 2 + matrix_height
+
+        image = Image.new("RGBA", (image_width, image_height), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(image)
+        color = (17, 24, 39, 255)
+        matrix_x = padding_x + bar_width + bar_gap
+        matrix_y = padding_y
+        left_bar_x = padding_x
+        right_bar_x = matrix_x + matrix_width + bar_gap
+        draw.rounded_rectangle((left_bar_x, padding_y, left_bar_x + bar_width, padding_y + matrix_height), radius=bar_width // 2, fill=color)
+        draw.rounded_rectangle((right_bar_x, padding_y, right_bar_x + bar_width, padding_y + matrix_height), radius=bar_width // 2, fill=color)
+
+        column_x = matrix_x
+        for column in range(column_count):
+            decimal_x = column_x + left_widths[column]
+            for row_index, row in enumerate(rows):
+                left, dot, right = row[column]
+                y = matrix_y + row_index * (cell_height + row_gap)
+                draw.text((decimal_x - text_width(left), y), left, font=font, fill=color)
+                if dot:
+                    draw.text((decimal_x, y), dot, font=font, fill=color)
+                    draw.text((decimal_x + dot_width, y), right, font=font, fill=color)
+            column_x += column_widths[column] + column_gap
+
+        equals_x = right_bar_x + bar_width + equals_gap
+        equals_y = padding_y + (matrix_height - cell_height) / 2
+        draw.text((equals_x, equals_y), "=", font=font, fill=color)
+
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        texture = CoreImage(buffer, ext="png").texture
+        texture.mag_filter = "linear"
+        texture.min_filter = "linear"
+        return texture
+    except Exception as exc:
+        print(f"Determinant bitmap render failed: {exc}")
+        return None
+
+
 class Pill(Label):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -132,7 +305,7 @@ class OperationButton(Button):
         self.background_down = ""
         self.background_disabled_normal = ""
         self.size_hint = (None, None)
-        self.size = (dp(46), dp(40))
+        self.size = (dp(38), dp(40))
         self.bind(on_release=self.toggle)
         self.bind(selected=self.update_style)
         self.update_style()
@@ -150,65 +323,6 @@ class OperationButton(Button):
             self.color = (0.08, 0.12, 0.18, 1)
 
 
-class Rule(Widget):
-    def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.size_hint = (None, None)
-        self.height = dp(3)
-        with self.canvas:
-            Color(0.05, 0.09, 0.16, 1)
-            self.rect = Rectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self.update_rect, size=self.update_rect)
-
-    def update_rect(self, *_args) -> None:
-        self.rect.pos = self.pos
-        self.rect.size = self.size
-
-
-class RadicalExpression(Widget):
-    def __init__(self, number_label: Label, color: tuple[float, float, float, float], **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.size_hint = (None, None)
-        self.number_label = number_label
-        self.root_width = dp(32)
-        self.left_padding = dp(2)
-        self.label_gap = dp(5)
-        self.right_padding = dp(6)
-        self.top_padding = dp(15)
-        self.bottom_padding = dp(3)
-        self.width = self.left_padding + self.root_width + self.label_gap + number_label.width + self.right_padding
-        self.height = number_label.height + self.top_padding + self.bottom_padding
-        with self.canvas.before:
-            Color(*color)
-            self.radical_line = Line(width=dp(2.2), cap="square", joint="miter")
-        self.add_widget(number_label)
-        self.bind(pos=self.update_layout, size=self.update_layout)
-        self.update_layout()
-
-    def update_layout(self, *_args) -> None:
-        x, y = self.pos
-        w, h = self.size
-        stroke = dp(2)
-        top_y = y + h - dp(6)
-        low_y = y + dp(8)
-        mid_y = y + h * 0.42
-        root_x = x + self.left_padding
-        root_right = root_x + self.root_width
-        end_x = x + w - self.right_padding
-        self.radical_line.points = [
-            root_x,
-            mid_y,
-            root_x + self.root_width * 0.22,
-            low_y,
-            root_right,
-            top_y,
-            end_x,
-            top_y,
-        ]
-        label_x = root_right + self.label_gap
-        self.number_label.pos = (label_x, y + self.bottom_padding)
-
-
 class FormulaView(AnchorLayout):
     def __init__(self, **kwargs) -> None:
         super().__init__(anchor_x="center", anchor_y="center", **kwargs)
@@ -221,6 +335,7 @@ class FormulaView(AnchorLayout):
     def set_message(self, text: str) -> None:
         self.current_problem = None
         self.message = text
+        self.height = self.message_height()
         self.clear_widgets()
         label = Label(
             text=text,
@@ -235,6 +350,7 @@ class FormulaView(AnchorLayout):
 
     def set_problem(self, problem: engine.Problem) -> None:
         self.current_problem = problem
+        self.height = self.problem_height(problem)
         self.clear_widgets()
         self.add_widget(self.render_problem(problem))
 
@@ -271,100 +387,60 @@ class FormulaView(AnchorLayout):
         return row
 
     def render_problem(self, problem: engine.Problem) -> Widget:
+        if problem.matrix is not None:
+            texture = determinant_to_texture(problem.matrix, self.determinant_font_size(problem.matrix), self.latex_dpi())
+            if texture is not None:
+                return self.texture_image(texture)
+
         latex = problem.latex.strip()
-        if latex.startswith(r"\frac{"):
-            parts = self.parse_fraction(latex)
-            if parts is not None:
-                return self.render_fraction(*parts)
-        if latex.startswith(r"\sqrt{"):
-            number = self.parse_sqrt(latex)
-            if number is not None:
-                return self.render_sqrt(number)
-        if "^2" in latex:
-            base = latex.split("^2", 1)[0].strip()
-            return self.render_square(base)
-        binary = self.parse_binary(latex)
-        if binary is not None:
-            return self.render_binary(*binary)
+        texture = latex_to_texture(latex, self.latex_font_size(latex), self.latex_dpi())
+        if texture is not None:
+            return self.texture_image(texture)
         return self.formula_label(problem.prompt.strip(), self.font_for(len(problem.prompt)))
 
-    def parse_fraction(self, latex: str) -> tuple[str, str] | None:
-        try:
-            rest = latex.removeprefix(r"\frac{")
-            numerator, rest = rest.split("}{", 1)
-            denominator = rest.split("}", 1)[0]
-        except ValueError:
-            return None
-        return numerator, denominator
+    def determinant_font_size(self, matrix: tuple[tuple[str, ...], ...]) -> float:
+        return 34.0 if len(matrix) <= 2 else 30.0
 
-    def parse_sqrt(self, latex: str) -> str | None:
-        try:
-            return latex.removeprefix(r"\sqrt{").split("}", 1)[0]
-        except ValueError:
-            return None
+    def message_height(self) -> float:
+        return dp(82)
 
-    def parse_binary(self, latex: str) -> tuple[str, str, str] | None:
-        body = latex.removesuffix("=").strip()
-        for token, symbol in ((r"\times", "×"), ("+", "+"), ("-", "-")):
-            marker = f" {token} "
-            if marker in body:
-                left, right = body.split(marker, 1)
-                return left.strip(), symbol, right.strip()
-        return None
+    def problem_height(self, problem: engine.Problem) -> float:
+        if problem.matrix is None:
+            return dp(88)
+        return dp(108) if len(problem.matrix) <= 2 else dp(116)
 
-    def render_binary(self, left: str, symbol: str, right: str) -> Widget:
-        size = self.font_for(len(left) + len(right) + 4)
-        row = self.formula_row()
-        for text in (left, symbol, right, "="):
-            row.add_widget(self.formula_label(text, size))
-        return row
+    def latex_font_size(self, latex: str) -> float:
+        visible = (
+            latex.replace(r"\times", "x")
+            .replace(r"\frac", "")
+            .replace(r"\sqrt", "")
+            .replace(r"\left", "")
+            .replace(r"\right", "")
+            .replace(r"\substack", "")
+            .replace(r"\quad", " ")
+            .replace("\\", "")
+            .replace("{", "")
+            .replace("}", "")
+        )
+        return max(24.0, min(42.0, 560.0 / max(10, len(visible))))
 
-    def render_square(self, base: str) -> Widget:
-        size = self.font_for(len(base) + 3)
-        row = self.formula_row(dp(4))
-        base_label = self.formula_label(base, size)
-        exponent = self.formula_label("2", max(sp(20), size * 0.52))
-        exponent_holder = AnchorLayout(anchor_x="left", anchor_y="top", size_hint=(None, None))
-        exponent_holder.size = (exponent.width, base_label.height)
-        exponent_holder.add_widget(exponent)
-        row.add_widget(base_label)
-        row.add_widget(exponent_holder)
-        row.add_widget(self.formula_label("=", size))
-        return row
+    def latex_dpi(self) -> int:
+        window_dpi = getattr(Window, "dpi", 0) or 320
+        return max(260, min(420, int(window_dpi)))
 
-    def render_fraction(self, numerator: str, denominator: str) -> Widget:
-        size = self.font_for(max(len(numerator), len(denominator)) + 4, max_size=48.0, min_size=20.0)
-        numerator_label = self.formula_label(numerator, size)
-        denominator_label = self.formula_label(denominator, size)
-        width = max(numerator_label.width, denominator_label.width) + dp(18)
-        numerator_label.width = width
-        denominator_label.width = width
-        numerator_label.text_size = numerator_label.size
-        denominator_label.text_size = denominator_label.size
-
-        rule = Rule(width=width)
-        fraction = BoxLayout(orientation="vertical", spacing=dp(2), size_hint=(None, None))
-        fraction.width = width
-        fraction.height = numerator_label.height + denominator_label.height + rule.height + dp(4)
-        fraction.add_widget(numerator_label)
-        fraction.add_widget(rule)
-        fraction.add_widget(denominator_label)
-
-        row = self.formula_row(dp(12))
-        row.add_widget(fraction)
-        row.add_widget(self.formula_label("=", size))
-        return row
-
-    def render_sqrt(self, number: str) -> Widget:
-        size = self.font_for(len(number) + 3, max_size=58.0, min_size=24.0)
-        number_label = self.formula_label(number, size * 0.92)
-        number_label.width += dp(4)
-        number_label.text_size = number_label.size
-
-        row = self.formula_row(dp(2))
-        row.add_widget(RadicalExpression(number_label, self.color))
-        row.add_widget(self.formula_label("=", size))
-        return row
+    def texture_image(self, texture) -> KivyImage:
+        texture_width, texture_height = texture.size
+        max_width = max(dp(240), (self.width or Window.width) - dp(36))
+        max_height = max(dp(64), (self.height or self.message_height()) - dp(6))
+        scale = min(max_width / texture_width, max_height / texture_height)
+        image = KivyImage(
+            texture=texture,
+            allow_stretch=True,
+            keep_ratio=True,
+            size_hint=(None, None),
+            size=(texture_width * scale, texture_height * scale),
+        )
+        return image
 
 
 class MentalMathAndroidApp(App):
@@ -448,7 +524,7 @@ class MentalMathAndroidApp(App):
         )
         root.add_widget(self.progress_label)
 
-        self.formula_view = FormulaView(size_hint_y=None, height=dp(94))
+        self.formula_view = FormulaView(size_hint_y=None, height=dp(82))
         root.add_widget(self.formula_view)
 
         self.feedback_label = Label(

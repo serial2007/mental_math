@@ -10,7 +10,7 @@ source.exclude_dirs = .git,.venv-android,.buildozer,bin,__pycache__,matplotlib_c
 source.exclude_patterns = *.bak
 
 version = 0.1.0
-requirements = python3,kivy
+requirements = python3,kivy,matplotlib
 
 orientation = portrait
 fullscreen = 0

@@ -32,6 +32,8 @@ OPERATION_LABELS: dict[Operation, str] = {
     "div": "Division",
     "square": "Square",
     "sqrt": "Square root",
+    "det2": "2x2 determinant",
+    "det3": "3x3 determinant",
 }
 
 OPERATION_SYMBOLS: dict[Operation, str] = {
@@ -41,6 +43,8 @@ OPERATION_SYMBOLS: dict[Operation, str] = {
     "div": "÷",
     "square": "x²",
     "sqrt": "√",
+    "det2": "|2|",
+    "det3": "|3|",
 }
 
 DIFFICULTY_LABELS: dict[Difficulty, str] = {
@@ -70,6 +74,7 @@ class Problem:
     display_answer: str
     operation: str
     approximate: bool = False
+    matrix: tuple[tuple[str, ...], ...] | None = None
 
 
 def random_int(difficulty: Difficulty, ranges: dict[Difficulty, tuple[int, int]]) -> int:
@@ -197,6 +202,93 @@ def make_square_root(difficulty: Difficulty, precision: int) -> Problem:
     )
 
 
+def determinant_entry_decimals(precision: int) -> int:
+    return 0
+
+
+def determinant_entry_range(difficulty: Difficulty) -> tuple[int, int]:
+    ranges = {
+        "easy": (0, 10),
+        "medium": (0, 100),
+        "hard": (0, 1000),
+    }
+    return ranges[difficulty]
+
+
+def make_determinant_entry(difficulty: Difficulty, precision: int) -> Decimal:
+    _low, high = determinant_entry_range(difficulty)
+    raw = random.randint(-high, high)
+    return Decimal(raw)
+
+
+def make_matrix(size: int, difficulty: Difficulty, precision: int) -> list[list[Decimal]]:
+    return [
+        [make_determinant_entry(difficulty, precision) for _column in range(size)]
+        for _row in range(size)
+    ]
+
+
+def determinant_2x2(matrix: list[list[Decimal]]) -> Decimal:
+    return matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+
+
+def determinant_3x3(matrix: list[list[Decimal]]) -> Decimal:
+    a, b, c = matrix[0]
+    d, e, f = matrix[1]
+    g, h, i = matrix[2]
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+
+
+def format_exact_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def determinant_latex(matrix: list[list[Decimal]]) -> str:
+    rows = [
+        r"\quad".join(format_exact_decimal(value) for value in row)
+        for row in matrix
+    ]
+    return rf"\left|\substack{{{r'\\'.join(rows)}}}\right| ="
+
+
+def determinant_prompt(matrix: list[list[Decimal]]) -> str:
+    rows = ["[" + ", ".join(format_exact_decimal(value) for value in row) + "]" for row in matrix]
+    return f"det({'; '.join(rows)}) = "
+
+
+def make_determinant_problem(size: int, difficulty: Difficulty, precision: int) -> Problem:
+    determinant = determinant_2x2 if size == 2 else determinant_3x3
+    while True:
+        matrix = make_matrix(size, difficulty, precision)
+        result = determinant(matrix)
+        if result != 0:
+            break
+
+    display_answer = format_exact_decimal(result)
+    label = OPERATION_LABELS[f"det{size}"]
+    return Problem(
+        determinant_prompt(matrix),
+        determinant_latex(matrix),
+        result,
+        display_answer,
+        label,
+        matrix=tuple(tuple(format_exact_decimal(value) for value in row) for row in matrix),
+    )
+
+
+def make_determinant_2x2(difficulty: Difficulty, precision: int) -> Problem:
+    return make_determinant_problem(2, difficulty, precision)
+
+
+def make_determinant_3x3(difficulty: Difficulty, precision: int) -> Problem:
+    return make_determinant_problem(3, difficulty, precision)
+
+
 GENERATORS: dict[Operation, Callable[[Difficulty, int], Problem]] = {
     "add": make_addition,
     "sub": make_subtraction,
@@ -204,6 +296,8 @@ GENERATORS: dict[Operation, Callable[[Difficulty, int], Problem]] = {
     "div": make_division,
     "square": make_square,
     "sqrt": make_square_root,
+    "det2": make_determinant_2x2,
+    "det3": make_determinant_3x3,
 }
 
 
@@ -571,7 +665,17 @@ def run_gui(args: argparse.Namespace) -> int:
             cache_dir = APP_DIR / "matplotlib_cache"
             cache_dir.mkdir(exist_ok=True)
             os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
+            from matplotlib import rcParams
             from matplotlib.mathtext import math_to_image
+
+            rcParams["mathtext.fontset"] = "cm"
+            rcParams["font.family"] = "serif"
+            rcParams["font.serif"] = [
+                "Computer Modern Roman",
+                "CMU Serif",
+                "Latin Modern Roman",
+                "DejaVu Serif",
+            ]
 
             buffer = BytesIO()
             math_to_image(
@@ -1143,7 +1247,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Mental arithmetic practice: addition, subtraction, multiplication, division, square, and square root."
+        description="Mental arithmetic practice: arithmetic, powers, roots, and determinants."
     )
     parser.add_argument("--cli", action="store_true", help="Use terminal mode instead of the default Qt GUI.")
     parser.add_argument("-n", "--count", type=int, default=20, help="Number of questions, default 20.")
@@ -1167,7 +1271,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=("all", *GENERATORS.keys()),
         default=None,
-        help="Operations: all/add/sub/mul/div/square/sqrt. GUI uses saved config or none; CLI defaults to all.",
+        help="Operations: all/add/sub/mul/div/square/sqrt/det2/det3. GUI uses saved config or none; CLI defaults to all.",
     )
     parser.add_argument("--seed", type=int, help="Fixed random seed for repeatable sessions.")
     return parser
